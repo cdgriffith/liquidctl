@@ -37,21 +37,23 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 import logging
+from pathlib import Path
 
 import usb
+from box import BoxList
+from appdirs import user_data_dir
 
 import liquidctl.util
 from liquidctl.driver.base_usb import BaseUsbDriver
 
-
 LOGGER = logging.getLogger(__name__)
 
-_FIXED_SPEED_CHANNELS = {    # (message type, minimum duty, maximum duty)
-    'fan':   (0x12, 30, 100),
-    'pump':  (0x13, 30, 100),
+_FIXED_SPEED_CHANNELS = {  # (message type, minimum duty, maximum duty)
+    'fan': (0x12, 30, 100),
+    'pump': (0x13, 30, 100),
 }
-_VARIABLE_SPEED_CHANNELS = { # (message type, minimum duty, maximum duty)
-    'fan':   (0x11, 30, 100)
+_VARIABLE_SPEED_CHANNELS = {  # (message type, minimum duty, maximum duty)
+    'fan': (0x11, 30, 100)
 }
 _MAX_PROFILE_POINTS = 6
 _CRITICAL_TEMPERATURE = 60
@@ -76,6 +78,16 @@ _UNKNOWN_OPEN_VALUE = 0xFFFF
 # Control request type
 _USBXPRESS = usb.util.CTRL_OUT | usb.util.CTRL_TYPE_VENDOR | usb.util.CTRL_RECIPIENT_DEVICE
 
+DEFAULT_COLOR_STATE = BoxList([
+    0x10,  # cmd: color change
+    0x00, 0x00, 0x00,  # main color: #000000
+    0x00, 0x00, 0x00,  # alt. color: #000000
+    0xff, 0x00, 0x00, 0x37,  # TODO
+    0x00, 0x00,  # interval (alternating, blinking): 0
+    0x00, 0x00, 0x00,  # mode: on, !alternating, !fixed
+    0x01, 0x00, 0x01  # TODO
+])
+
 
 class AsetekDriver(BaseUsbDriver):
     """USB driver for fifth generation Asetek coolers."""
@@ -83,6 +95,14 @@ class AsetekDriver(BaseUsbDriver):
     SUPPORTED_DEVICES = [
         (0x2433, 0xb200, None, 'Asetek 690LC (NZXT, EVGA or other) (experimental)', {}),
     ]
+
+    def __init__(self, device, description):
+        data_dir = Path(user_data_dir("liquidctl", roaming=True))
+        self.data_file = Path(data_dir, 'profile.yaml')
+        if not self.data_file.exists():
+            data_dir.mkdir(parents=True)
+            DEFAULT_COLOR_STATE.to_yaml(filename=self.data_file)
+        super().__init__(device, description)
 
     def connect(self):
         """Connect to the device.
@@ -119,7 +139,7 @@ class AsetekDriver(BaseUsbDriver):
         msg = self._end_transaction_and_read()
         firmware = '{}.{}.{}.{}'.format(*tuple(msg[0x17:0x1b]))
         return [
-            ('Liquid temperature', msg[10] + msg[14]/10, '°C'),  # TODO sensible decimal?
+            ('Liquid temperature', msg[10] + msg[14] / 10, '°C'),  # TODO sensible decimal?
             ('Fan speed', msg[0] << 8 | msg[1], 'rpm'),
             ('Pump speed', msg[8] << 8 | msg[9], 'rpm'),
             ('Firmware version', firmware, '')  # TODO sensible firmware version?
@@ -210,15 +230,7 @@ class AsetekDriver(BaseUsbDriver):
         not aware of any command specifically for getting data.  Instead, this
         uses a color change command, turning it off.
         """
-        self._write([
-            0x10,  # cmd: color change
-            0x00, 0x00, 0x00,  # main color: #000000
-            0x00, 0x00, 0x00,  # alt. color: #000000
-            0xff, 0x00, 0x00, 0x37,  # TODO
-            0x00, 0x00,  # interval (alternating, blinking): 0
-            0x01, 0x00, 0x00,  # mode: on, !alternating, !fixed
-            0x01, 0x00, 0x01  # TODO
-            ])
+        self._write(BoxList.from_yaml(filename=self.data_file))
 
     def _write(self, data):
         LOGGER.debug('write %s', ' '.join(format(i, '02x') for i in data))
@@ -226,3 +238,55 @@ class AsetekDriver(BaseUsbDriver):
             return
         self.device.write(_WRITE_ENDPOINT, data, _WRITE_TIMEOUT)
 
+    def set_color(self, channel, mode, colors, speed):
+        """Set the color of the logo."""
+        modes = ('fixed', 'alternating', 'blinking', 'off')
+        speeds = {
+            'fastest': 1,
+            'faster': 2,
+            'normal': 3,
+            'slower': 4,
+            'slowest': 5
+        }
+        try:
+            speed = int(speed)
+        except ValueError:
+
+            if speed not in speeds:
+                LOGGER.warning('Speed must be a value between 1 and 255, setting to 1')
+                speed = 1
+            else:
+                speed = speeds[speed]
+        else:
+            if speed < 1 or speed > 255:
+                speed = 1
+                LOGGER.warning('Speed must be a value between 1 and 255, setting to 1')
+
+        if channel != 'logo':
+            LOGGER.warning('Only "logo" channel supported for this device, falling back to that')
+
+        if mode not in modes:
+            raise NotImplementedError('Modes available are: {}'.format(",".join(modes)))
+
+        if mode == 'off':
+            color1, color2 = [0x00, 0x00, 0x00], [0x00, 0x00, 0x00]
+        else:
+            color1, *color2 = colors
+            if len(color2) > 1:
+                LOGGER.warning('Only maximum of 2 colors supported, ignoring further colors')
+            color2 = color2[0] if color2 else [0x00, 0x00, 0x00]
+
+        self._begin_transaction()
+        data = BoxList([0x10] +
+                       color1 +
+                       color2 +
+                       [0xff, 0x00, 0x00, 0x37,
+                        speed,
+                        speed,
+                        0x00 if mode == 'off' else 0x01,
+                        0x01 if mode == 'alternating' else 0x00,
+                        0x01 if mode == 'blinking' else 0x00,
+                        0x01, 0x00, 0x01])
+        data.to_yaml(filename=self.data_file)
+        self._write(data)
+        self._end_transaction_and_read()

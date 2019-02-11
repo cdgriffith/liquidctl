@@ -27,7 +27,7 @@ setuptools.setup(
         'Intended Audience :: Developers',
         'Topic :: System :: Hardware :: Hardware Drivers',
         'Operating System :: OS Independent',
-        'License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)',
+        'License :: OSI Approved :: GNU General Public License v3 or later (GPLv3cmd+)',
         'Programming Language :: Python :: 3',
     ],
     keywords='cross-platform driver nzxt kraken smart-device grid',
@@ -35,11 +35,16 @@ setuptools.setup(
         'Documentation': '{}/blob/v{}/README.md'.format(repo_url, version),
         'Changelog': '{}/blob/v{}/CHANGELOG.md'.format(repo_url, version),
     },
-    install_requires=['docopt', 'pyusb'],
+    install_requires=['docopt', 'pyusb', 'python-box', 'appdirs', 'ruamel.yaml'],
     python_requires='>=3',
     entry_points={
         'console_scripts': [
             'liquidctl=liquidctl.cli:main',
         ],
     },
+    extras_require={
+        'dev': [
+            'pyinstaller'
+        ]
+    }
 )
